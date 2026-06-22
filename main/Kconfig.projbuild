@@ -1,0 +1,173 @@
+menu "Water Meter Configuration"
+
+    menu "Device Configuration"
+
+        config WM_DEVICE_NAME_PREFIX
+            string "Prefix for Device Name"
+            default "WM"
+		config WM_BLE_NAME
+			string "Prefix for Device Name"
+			default "WM"
+
+        config WM_DEVICE_PASSWORD_PREFIX
+            string "Prefix for Device Password"
+            default "123456"
+
+        config WM_CYCLIC_RESET_COUNT
+            int "No of Counts for Cyclic Counter Reset and EEPROM Write"
+            default 10
+            range 1 100000
+
+        config WM_VOLUME_MULTIPLIER
+            int "Multiplier for Water Meter"
+            default 3
+            range 1 255
+
+        config WM_PERIODIC_INTERVAL_MIN
+            int "Periodic Interval (minutes)"
+            default 3
+            range 1 1440
+
+        config WM_WAKEUP_DURATION_MIN
+            int "Wakeup Duration (minutes)"
+            default 1
+            range 1 60
+
+        config WM_DAYTIME_START_HOUR
+            int "DayTime Run Start Hour"
+            default 0
+            range 0 23
+
+        config WM_DAYTIME_END_HOUR
+            int "DayTime Run End Hour"
+            default 23
+            range 0 23
+			
+		config WM_SCHEDULE_DAY_START
+			int "DayTime Run Start Hour"   
+			default 1
+			range 1 31
+			
+		config WM_SCHEDULE_DAY_END
+			int "DayTime Run End Hour"
+			default 31
+			range 1 31
+			
+        config WM_FW_VERSION
+            int "Firmware Version"
+            default 1
+            range 1 31
+
+		config WM_BLE_INACTIVITY_SEC
+			int "BLE inactivity timeout (sec)"
+			default 15
+			range 0 1000
+
+        choice
+            prompt "Meter Type"
+            default WM_METER_TYPE_PULSE
+
+            config WM_METER_TYPE_MAGNETIC
+                bool "Magnetic"
+
+            config WM_METER_TYPE_INDUCTIVE
+                bool "Inductive"
+
+            config WM_METER_TYPE_PULSE
+                bool "Pulse"
+
+            config WM_METER_TYPE_ULTRASONIC
+                bool "Ultrasonic"
+
+        endchoice
+
+        config WM_METER_TYPE
+            hex
+            default 0xAA if WM_METER_TYPE_MAGNETIC
+            default 0xAB if WM_METER_TYPE_INDUCTIVE
+            default 0xAC if WM_METER_TYPE_PULSE
+            default 0xAD if WM_METER_TYPE_ULTRASONIC
+
+        config WM_DEFAULT_BATTERY_VOLTAGE
+            int "Default Battery Voltage"
+            default 3700
+            range 1000 5000
+
+        config WM_METER_ID_BYTES
+            int "No. of Bytes for Meter ID"
+            default 16
+            range 4 64
+
+    endmenu
+
+
+    menu "GPIO Configuration"
+
+        config WM_BATTERY_ADC_GPIO
+            int "Pin for Battery Voltage ADC"
+            default 5
+
+        config WM_SENSOR1_GPIO
+            int "Pin for Sensor 1"
+            default 10
+
+        config WM_SENSOR2_GPIO
+            int "Pin for Sensor 2"
+            default 11
+
+        config WM_CASE_OPEN_TAMPER_GPIO
+            int "Pin for Case Open Tamper"
+            default 12
+
+        config WM_MAGNETIC_TAMPER_GPIO
+            int "Pin for Magnetic Tamper"
+            default 0
+
+        config WM_REMOVAL_TAMPER_GPIO
+            int "Pin for Removal Tamper"
+            default 2
+
+        config WM_EEPROM_SDA_GPIO
+            int "EEPROM I2C SDA Pin"
+            default 26
+
+        config WM_EEPROM_SCL_GPIO
+            int "EEPROM I2C SCL Pin"
+            default 27
+
+        config WM_EEPROM_POWER_GPIO
+            int "Pin for I2C EEPROM Powerup"
+            default 22
+
+        config WM_LORA_WAKEUP_GPIO
+            int "Pin for LoRa Wakeup Interrupt"
+            default 3
+
+        config WM_LORA_UART_TX_GPIO
+            int "Pin for LoRa UART TX"
+            default 1
+
+        config WM_LORA_UART_RX_GPIO
+            int "Pin for LoRa UART RX"
+            default 4
+
+    endmenu
+
+endmenu
+
+
+
+# put here your custom config value
+menu "Example Configuration"
+config ESP_WIFI_SSID
+    string "WiFi SSID"
+    default "myssid"
+    help
+	SSID (network name) for the example to connect to.
+
+config ESP_WIFI_PASSWORD
+    string "WiFi Password"
+    default "mypassword"
+    help
+	WiFi password (WPA or WPA2) for the example to use.
+endmenu

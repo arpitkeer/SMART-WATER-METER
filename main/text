@@ -1,0 +1,518 @@
+
+1. ESP waking immediately after sleep
+
+Problem
+
+GPIO stayed active causing instant wakeups. while testing using gpio 10 and 11 and connecting them with ground 
+everything work as intended,
+but when i used the same firmware on the real water meter. the magnet stopped moving just below one of the gpio 
+causing instant wakeups
+
+Solution
+
+Removed flawed stuck-mode wake logic.
+Switched to transition-based behavior. before sleeping i checked whether the gpio is high or low. if its high i 
+configured the sleep to wake on low and vice verca.
+Corrected EXT1 polarity handling.
+3. GPIO stuck HIGH forever
+
+Problem
+
+Static HIGH on hall sensor caused repeated wake behavior.
+
+Solution
+
+Ignore static state.
+Only count transitions/pulses.
+Sleep normally if no activity
+.
+4. Both hall sensors stuck simultaneously
+
+Problem
+
+System entered unstable stuck-state loop.
+
+Solution
+
+Removed aggressive stuck-state handling.
+Simplified to pulse-based logic.
+
+5. BLE starting on every water pulse
+
+Problem
+
+Massive unnecessary BLE wakeups and battery drain.
+
+Solution
+
+BLE decoupled from water activity.
+Water only updates counters now.
+the previouse versions i made had a flaw, i misunderstood the assignment and activated the ble while water was running 
+i removed the ble call from pulse counter and wakeup condition and implemented a data and time based configurable ble wakeup that is
+independent from the pulse counter. and it work while water running or not. saving tones of battery
+6. BLE advertising continuously
+
+Problem
+
+Advertising never stopped.
+
+Solution
+
+Added:
+BLE_OPEN_DURATION_US
+Automatic BLE stop after window expiry.
+7. EEPROM wear-out risk
+
+Problem
+
+EEPROM writes happening every BLE cycle.
+
+Solution
+
+EEPROM writes limited to:
+pulse reached the block size
+tamper events
+critical saves only
+8. RTC time not configured
+
+Problem
+
+Schedule logic unusable.
+
+Solution
+
+Added:
+TIME YYYY-MM-DD HH:MM:SS (right now i have implemented the fake dates and time)
+
+BLE provisioning command.
+
+9. BLE provisioning impossible after sleep
+
+Problem
+
+No BLE outside schedule meant no way to set RTC.
+
+Solution
+
+Provisioning mode:
+if RTC invalid
+→ advertise every 5 min (testing purpose) 
+added a remote timer fix
+10. Wrong BLE payload architecture mixed
+
+Problem
+
+Integer payload API mixed with packet API.
+
+Solution
+
+Unified to packet-based BLE:
+nimble_adv_update_packet()
+11. total variable scope errors
+
+Problem
+
+BLE packet builder used outside pulse section.
+
+Solution
+
+Moved payload generation only where total exists.
+12. Undefined references during linking
+
+Problem
+
+tamper_flag and schedule symbols unresolved.
+
+Solution
+
+Removed extra-component architecture.
+Consolidated logic into existing project structure.
+13. Deep sleep timer not working correctly
+
+Problem
+
+ESP never woke for scheduled BLE windows.
+
+Solution
+
+Correct timer wake:
+esp_sleep_enable_timer_wakeup()
+14. BLE advertisement invisible in nRF Connect
+
+Problem
+
+Advertising stopped too early or never started.
+
+Solution
+
+Fixed schedule logic.
+Correct timer wake handling.
+Correct BLE start conditions.
+
+15. Deep sleep not waking on GPIO release
+
+Problem
+
+GPIO12 tamper release failed to wake ESP.
+
+Solution
+
+Correct EXT1 wake mask.
+Correct wake polarity configuration.
+
+16. Incorrect wake source identification
+
+Problem
+
+Could not determine which GPIO woke ESP.
+
+Solution
+added cause of wakeup
+Added EXT1 wake mask logging:
+MASK : 0x...
+
+
+
+
+
+ESP32-H2 when in deep sleep cannot be wakeup by edge triggering, requires level triggering.
+
+
+BLE COMMADS Implemented as of 16-05-2026
+
+123456
+-> Authorizes BLE session. necessary for command execution
+
+LOCK
+-> Removes authorization / locks commands again
+
+GET
+-> Sends current live payload
+
+GET_CONFIG
+-> Prints EEPROM configuration
+
+CLR_TAMPER
+-> Clears tamper flag and saves EEPROM
+
+SAVE
+-> Saves current RTC state to EEPROM
+
+GET_TOTAL
+-> Prints total pulse/water count
+
+SET_METER_ID WM000123
+-> Updates meter ID
+
+SET_METER_TYPE 170
+-> Sets meter type (170 = 0xAA)
+
+SET_MULTIPLIER 10
+-> Sets volume multiplier
+
+SET_BATTERY 95
+-> Sets battery percentage
+
+SET_TZ 330
+-> Sets timezone offset in minutes
+-> 330 = India
+
+SET_INSTALL_DATE 16 05 2026
+-> Sets install date
+
+SET_INSTALL_COUNTER 500
+-> Sets install counter value
+
+SET_TIME 1778920000
+-> Sets RTC/system epoch time
+
+
+GET_MONTHLY_HISTORY
+-> monthly history 
+
+As of 20-05-2026, support for all tamper GPIOs has been implemented successfully.
+
+If GPIO pin configurations need to be modified, the old `sdkconfig` and `sdkconfig.old` files should be
+deleted before rebuilding the project to ensure proper regeneration of configuration values.
+
+EEPROM power-gating support has also been implemented. The EEPROM now receives power only during read/write
+operations, helping reduce unnecessary battery consumption. The related code is currently commented out
+because the required hardware power-control pin is not yet available on the current setup.
+
+A low-power watchdog system has been implemented as a separate component and integrated into the firmware
+architecture.
+
+Today’s focus will be improving and optimizing the BLE buffer system to make it more robust, efficient,
+and production-ready. BLE buffer is mainly used to acknoledge/response the incoming commands from BLE.
+
+AS OF 25THMAY:-
+BLE AUTH IS ACTIVE FOR NEXT 5 MIN. ANYONE CAN SEND THE MESSAGE IN THIS TIME PERIOD
+ANYONE CAN ADVERTISE THE FAKE PAYLOAD (PREVENTED USING THE 2 WAY REPONSE AND CHALLANGE AUTHENTICATION)
+AUTHORIZATION MAY NOT LOGOUT, NOT SURE ABOUT THAT. disconnect after reading is taken, unauthorze , allow 1 connection
+TOO MUCH WAKEUP TIME WHEN WATER IS BEING SUPPLIED (PREVENTED USING STRICT BLE TIMING AND RTC MEMORY HELP (JUST REALIZED
+RTC CAN SURVIVE THE DEEP SLEEP, ALTHOUGH ALREADY KNEW BUT WAS NOT SURE FOR THE ESP32-H2))
+from chatgpt
+1) In meter_helper.c, inside GET_TOTAL
+
+Set a flag after sending the total:
+
+if (strcmp(local, "GET_TOTAL") == 0)
+{
+    uint32_t total =
+        meter_total(
+            rtc_blocks,
+            pulse_bucket,
+            BLOCK_SIZE);
+
+    ble_emit_control_line("[BLE] TOTAL : %" PRIu32, total);
+    publish_current_state();
+
+    s_ble_paused_after_total = true;
+    stop_ble_if_needed();
+    nimble_adv_authorize(false);
+    return;
+}
+
+Add near the top of meter_helper.c:
+
+RTC_DATA_ATTR static bool s_ble_paused_after_total = false;
+
+bool meter_helper_ble_paused_after_total(void)
+{
+    return s_ble_paused_after_total;
+}
+
+void meter_helper_clear_ble_pause(void)
+{
+    s_ble_paused_after_total = false;
+}
+
+And declare them in meter_helper.h.
+
+2) In main.c, stop starting BLE while paused
+
+Change this block:
+
+if (ble_allowed_now || auth_active)
+{
+    ...
+    start_ble_if_needed();
+}
+else
+{
+    stop_ble_if_needed();
+}
+
+to:
+
+if (meter_helper_ble_paused_after_total())
+{
+    stop_ble_if_needed();
+}
+else if (ble_allowed_now || auth_active)
+{
+    if (!ble_inited)
+    {
+        nimble_adv_config_t ble_cfg = {
+            .device_name = "WM"
+        };
+
+        ESP_ERROR_CHECK(nimble_adv_init(&ble_cfg));
+        nimble_adv_set_cmd_cb(ble_command_handler);
+        ble_inited = true;
+    }
+
+    start_ble_if_needed();
+}
+else
+{
+    stop_ble_if_needed();
+}
+3) Clear the pause at the next month window
+
+In main.c, when you detect a new month window is starting, clear the flag:
+
+if (ble_window_allowed && meter_helper_ble_paused_after_total())
+{
+    meter_helper_clear_ble_pause();
+}
+
+Put that before the BLE start/stop logic.
+
+Result
+
+After GET_TOTAL:
+
+meter sends total,
+BLE stops,
+no more advertising,
+meter stays awake,
+BLE starts again only when your next allowed month window comes.
+
+If you want, I can give you the exact meter_helper.h declarations and the exact main.c patch block.
+
+to change reader from 1 to many conection 
+The exact places to change
+1) Single connection state
+
+These are the lines that make it one-meter-only:
+
+static uint16_t conn_handle = BLE_HS_CONN_HANDLE_NONE;
+static bool connected = false;
+static bool auth_done = false;
+static uint16_t data_handle = 0;
+static uint16_t cmd_handle = 0;
+static uint16_t text_handle = 0;
+static uint16_t cccd_handle = 0;
+static char s_meter_id[17] = {0};
+static uint8_t s_challenge[WM_CHALLENGE_LEN] = {0};
+
+You need to replace these with a connection table or an array of per-connection contexts.
+
+2) Scan logic that cancels after the first meter
+
+In gap_event() under BLE_GAP_EVENT_EXT_DISC, you currently do this:
+
+ble_gap_disc_cancel();
+
+That means the reader stops scanning as soon as it finds one meter, then connects to only that one. For multiple meters, this has to change.
+
+3) Connect callback
+
+In BLE_GAP_EVENT_CONNECT, you assign:
+
+connected   = true;
+auth_done   = false;
+conn_handle = event->connect.conn_handle;
+
+That is another single-peer assumption. For multiple meters, this must become “create a new session entry for this conn_handle.”
+
+4) Auth receive path
+
+In BLE_GAP_EVENT_NOTIFY_RX, you are checking the notify data against one global auth_done and one global text_handle. That is also single-connection only. Each connection needs its own auth state and its own handles.
+
+5) Commands and reads
+
+These functions all use the one global connection:
+
+send_cmd(...)
+ble_gattc_read(conn_handle, ...)
+do_auth()
+
+So if you want multiple meters, these must take a connection context or connection handle parameter instead of using the globals.
+
+
+
+
+
+// done for the day
+
+
+RTC_DATA_ATTR bool force_ble_due_to_tamper = false;
+
+When magnetic tamper is detected, set it:
+
+if (current_magnetic_tamper && !meter_helper_get_magnetic_tamper())
+{
+    meter_helper_set_magnetic_tamper(true);
+    force_ble_due_to_tamper = true;
+
+    save_rtc_to_eeprom(
+        rtc_blocks,
+        pulse_bucket,
+        meter_helper_get_case_tamper(),
+        true,
+        meter_helper_get_removal_tamper(),
+        (int64_t)now_epoch);
+
+    printf(
+        "\n[MAGNETIC TAMPER]\n"
+        "[MAGNETIC TAMPER] DETECTED\n\n");
+
+    publish_current_state();
+}
+
+Then change your BLE gate to this:
+
+bool allow_ble =
+    force_ble_due_to_tamper ||
+    ble_allowed_now ||
+    auth_active;
+
+if (allow_ble)
+{
+    if (!ble_inited)
+    {
+        nimble_adv_config_t ble_cfg = {
+            .device_name = "WM"
+        };
+
+        ESP_ERROR_CHECK(nimble_adv_init(&ble_cfg));
+        nimble_adv_set_cmd_cb(ble_command_handler);
+        ble_inited = true;
+    }
+
+    start_ble_if_needed();
+}
+else
+{
+    stop_ble_if_needed();
+}
+
+If you want BLE to start in the same loop iteration as the tamper event, move the tamper update/check block above the BLE START/STOP block.
+
+Usually the best flow is:
+
+tamper_update(now_us);
+check magnetic tamper
+set force_ble_due_to_tamper = true;
+decide BLE using allow_ble
+
+
+TODAY 10-06-2026
+BASICALLY I WAS TESTING THE PULSE COUNTING ALONG WITH THE MECHANICAL WATER METER RREADING, UNTILL 100 WAS MATCHING THE
+READING OF THE SENSOR WITH METER IT WENT VERY WELL, BUT THEN I DECIDED TO TURN ON THE BLE OF ESP32H2 AND GET CONNECTED
+WITH THE WATER METER, AFTER SOMETIME I REALIZED THAT I HAVE LOST TOTAL OF 4 PULSES. AND I BELEIVE IT WAS THE REASON 
+FOR UNDERCOUNTING
+
+
+meter_storage_init() is masking EEPROM/storage failures. It calls meter_storage_load(), logs a warning if it fails, but
+still returns ESP_OK and marks storage initialized. That means the rest of the firmware 
+can keep running on defaults even when EEPROM is unreadable or commit fails, which will
+hide real field problems.
+
+
+/* =============================================================================
+ * main.c  —  Water Meter Firmware
+ *
+ * FIXES vs previous version
+ * ──────────────────────────
+ * FIX-1  LoRa fires every 120 s even while BLE is connected.
+ *        wm_request_lora_window_if_needed() + wm_run_lora_window() are now
+ *        called inside WM_STATE_BLE_CONNECTED.  LoRa TX runs inline (no state
+ *        transition) so the BLE session is never interrupted.
+ *
+ * FIX-2  No pulse undercount while BLE is connected.
+ *        last_count is now updated unconditionally in wm_handle_pulses(),
+ *        even when time is invalid or the save path is skipped.  This means
+ *        delta can never silently accumulate across ticks.
+ *
+ * FIX-3  Duplicate meter_storage_init() on cold boot removed.
+ *        The bare call at the top of wm_boot_once() that swallowed its own
+ *        error has been removed; only the ESP_ERROR_CHECK version remains.
+ *
+ * FIX-4  auth_start_us declared as RTC_DATA_ATTR in this file.
+ *        Previously it was used here but only defined in meter_helper.c,
+ *        meaning it never survived deep sleep.
+ *
+ * FIX-5  Hardware poll (tamper + pulses) now excluded during
+ *        WM_STATE_PREPARE_SLEEP and WM_STATE_LORA_WINDOW to prevent
+ *        concurrent EEPROM writes.
+ *
+ * FIX-6  Sleep request suppressed while BLE is actively connected.
+ *        wm_request_sleep_if_needed() now returns early when
+ *        nimble_adv_is_connected() is true.
+ *
+ * FIX-7  LORA_WINDOW state now restores correct previous state (RUN or
+ *        BLE_ADV) instead of always jumping to RUN.
+ * ============================================================================= */
