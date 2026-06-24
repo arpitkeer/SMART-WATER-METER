@@ -6,7 +6,7 @@
 #include "freertos/idf_additions.h"
 #include "freertos/projdefs.h"
 #include "hal/gpio_types.h"
-
+#include "../lora_manager/include/lora_manager.h"
 extern bool s_mag_ble_enabled;
 extern bool mag_ble_window_open; 
 
@@ -22,7 +22,7 @@ static bool s_rem_latched  = false;
 static bool s_master_last_sample_active = false;
 static int64_t s_master_stable_since_us = 0;
 
-static uint64_t s_stable_time_us = 300000ULL;
+static uint64_t s_stable_time_us = 50000ULL;
 static bool s_inited = false;
 
 static void config_input_gpio(gpio_num_t gpio)
@@ -35,13 +35,12 @@ static void config_input_gpio(gpio_num_t gpio)
         .pin_bit_mask = (1ULL << gpio),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE, /* CRITICAL: Keep enabled during RUN state */
         .intr_type = GPIO_INTR_DISABLE
     };
 
     gpio_config(&io);
 }
-
 void tamper_init(const tamper_config_t *cfg)
 {
     if (!cfg) {

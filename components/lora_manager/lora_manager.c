@@ -11,6 +11,7 @@
 
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/projdefs.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 
@@ -183,7 +184,7 @@ static void lora_handle_binary_cfg_packet(const uint8_t *pkt, size_t len)
         ESP_LOGW(TAG, "CFG: bad header");
         return;
     }
-	cfg_command = true;
+    cfg_command = true;
 
     const uint8_t *p   = pkt + 3;
     size_t         rem = len - 3;
@@ -191,27 +192,39 @@ static void lora_handle_binary_cfg_packet(const uint8_t *pkt, size_t len)
     if (rem < 1) { ESP_LOGW(TAG, "CFG: too short"); return; }
     uint8_t id_len = *p++; rem--;
     if (id_len == 0 || id_len > 16 || rem < id_len) { ESP_LOGW(TAG, "CFG: bad id_len"); return; }
+    
     char meter_id[17];
     memcpy(meter_id, p, id_len);
     meter_id[id_len] = '\0';
     p += id_len; rem -= id_len;
-
-    if (rem < 23) { ESP_LOGW(TAG, "CFG: tail too short"); return; }
+    
+    // Increased tail length requirement from 23 to 28 to accommodate the 5-byte epoch
+    if (rem < 28) { ESP_LOGW(TAG, "CFG: tail too short"); return; }
 
     uint8_t  meter_type        = *p++; rem--;
     uint8_t  volume_multiplier = *p++; rem--;
     uint32_t install_counter   = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
     p += 3; rem -= 3;
+    
     uint8_t  day   = *p++; rem--;
     uint8_t  month = *p++; rem--;
     uint16_t year  = (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
     p += 2; rem -= 2;
+    
     char lat_str[8]; memcpy(lat_str, p, 7); lat_str[7] = '\0'; p += 7; rem -= 7;
-    char lon_str[8]; memcpy(lon_str, p, 7); lon_str[7] = '\0';
+    char lon_str[8]; memcpy(lon_str, p, 7); lon_str[7] = '\0'; p += 7; rem -= 7; // Advance pointer past lon_str
 
-    ESP_LOGI(TAG, "CFG: id=%s type=%u mult=%u counter=%lu date=%02u/%02u/%04u lat=%s lon=%s",
+    // Parse 5-byte epoch time (Assuming big-endian network byte order like the rest of the payload)
+    uint64_t epoch_time = ((uint64_t)p[0] << 32) | 
+                          ((uint64_t)p[1] << 24) | 
+                          ((uint64_t)p[2] << 16) | 
+                          ((uint64_t)p[3] << 8)  | 
+                           (uint64_t)p[4];
+    p += 5; rem -= 5;
+
+    ESP_LOGI(TAG, "CFG: id=%s type=%u mult=%u counter=%lu date=%02u/%02u/%04u lat=%s lon=%s epoch=%llu",
              meter_id, meter_type, volume_multiplier, (unsigned long)install_counter,
-             day, month, year, lat_str, lon_str);
+             day, month, year, lat_str, lon_str, (unsigned long long)epoch_time);
 
     char cmd[64];
 
@@ -235,9 +248,14 @@ static void lora_handle_binary_cfg_packet(const uint8_t *pkt, size_t len)
     snprintf(cmd, sizeof(cmd), "SET_LOCATION %s %s", lat_str, lon_str);
     ble_command_handler(cmd);
 
+    // Forward the epoch to the BLE command handler (ensure your handler recognizes "SET_TIME" or adjust this string)
+    snprintf(cmd, sizeof(cmd), "SET_TIME %llu", (unsigned long long)epoch_time);
+    ble_command_handler(cmd);
+
     snprintf(cmd, sizeof(cmd), "SAVE");
     ble_command_handler(cmd);
-	cfg_command = false;
+    
+    cfg_command = false;
 
     ble_command_handler_set_source(WM_CMD_SRC_BLE);
 }
@@ -547,9 +565,10 @@ static esp_err_t lora_listen_for_commands(uint32_t listen_ms)
 
 static void lora_pins_safe_for_sleep(void)
 {
-    gpio_reset_pin(LORA_TX_GPIO);
-    gpio_set_direction(LORA_TX_GPIO, GPIO_MODE_OUTPUT);
-    gpio_set_level(LORA_TX_GPIO, 0);
+	// TEMPORARY TEST ONLY
+	gpio_set_level(LORA_TX_GPIO, 0); 
+	gpio_set_direction(LORA_TX_GPIO, GPIO_MODE_OUTPUT);
+	gpio_hold_en(LORA_TX_GPIO);
 
     gpio_reset_pin(LORA_RX_GPIO);
     gpio_set_direction(LORA_RX_GPIO, GPIO_MODE_INPUT);
@@ -559,14 +578,17 @@ static void lora_pins_safe_for_sleep(void)
     gpio_set_direction(LORA_WAKE_GPIO, GPIO_MODE_OUTPUT);
     gpio_set_level(LORA_WAKE_GPIO, 0);
 
+
     ESP_LOGI(TAG, "LoRa pins safe for deep sleep");
 }
 
-static esp_err_t lora_sleep_sequence(void)
+
+esp_err_t lora_sleep_sequence(void)
 {
     uint8_t sleep_cmd[] = { 0x05, 0x01, 0x02 };
 
     esp_err_t ret = lora_uart_send_raw(sleep_cmd, sizeof(sleep_cmd));
+	ESP_LOGI(TAG, "SLEEP COMMAND SENT");
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "sleep cmd send failed: %s", esp_err_to_name(ret));
         return ret;
@@ -616,6 +638,9 @@ static void build_lora_payload(lora_payload_t *p)
 
 esp_err_t lora_manager_init(void)
 {
+	gpio_hold_dis(LORA_TX_GPIO);
+    gpio_hold_dis(LORA_RX_GPIO);
+    gpio_hold_dis(LORA_WAKE_GPIO);
     if (s_inited) {
         return ESP_OK;
     }
@@ -646,16 +671,21 @@ esp_err_t lora_manager_init(void)
 
 esp_err_t lora_manager_deinit(void)
 {
-    if (!s_inited) {
-        return ESP_OK;
+    // 1. If LoRa was actively used, shut down the UART gracefully
+	
+    if (s_inited) {
+		lora_wake_sequence();
+		vTaskDelay(pdMS_TO_TICKS(50));
+		lora_sleep_sequence();
+		vTaskDelay(pdMS_TO_TICKS(50));
+        uart_wait_tx_done(LORA_UART, pdMS_TO_TICKS(1000));
+        uart_driver_delete(LORA_UART);
+        s_inited = false;
+        ESP_LOGI(TAG, "LoRa deinit complete");
     }
 
-    uart_wait_tx_done(LORA_UART, pdMS_TO_TICKS(1000));
-    uart_driver_delete(LORA_UART);
     lora_pins_safe_for_sleep();
 
-    s_inited = false;
-    ESP_LOGI(TAG, "LoRa deinit complete");
     return ESP_OK;
 }
 

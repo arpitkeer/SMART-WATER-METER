@@ -89,7 +89,9 @@ int ota_control_cb(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_a
     }
     return 0;
 }
-
+bool ota_manager_is_running(void){
+	return s_ota_running;
+}
 int ota_data_cb(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) 
 {
     if (!s_ota_running) {

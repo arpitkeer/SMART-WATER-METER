@@ -18,7 +18,7 @@
 #include "host/ble_hs_adv.h"
 #include "host/ble_hs_hci.h"
 #include "host/ble_hs_mbuf.h"
-
+#include "esp_bt.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 #include "../deep_sleep_manager/include/deep_sleep_manager.h"
@@ -30,7 +30,7 @@
 #include "ota_manager.h" 
 
 static const char *TAG = "nimble_adv";
-
+extern volatile bool g_force_run_state;
 /* =========================================================
  * CONFIG
  * ========================================================= */
@@ -64,6 +64,7 @@ static uint8_t s_adv_instance = 0;
 static ble_cmd_cb_t s_cmd_cb = NULL;
 
 extern int64_t last_activity;
+extern int64_t last_ble_activity;
 static int64_t s_connect_time_us = 0;
 static uint8_t s_auth_fail_count = 0;
 /* =========================================================
@@ -142,6 +143,12 @@ static int send_text_common(
 
 static bool advertise(void);
 static void reset_connection_state(void);
+
+static inline bool is_text_notify_handle(uint16_t attr_handle)
+{
+    return (attr_handle == s_text_handle) ||
+           (attr_handle == (uint16_t)(s_text_handle + 1));
+}
 
 /* =========================================================
  * HELPERS
@@ -443,6 +450,7 @@ static int cmd_access(
 			{
             s_authorized = true;
             s_auth_fail_count = 0;
+			s_connected = true;
             ESP_LOGI(TAG, "AUTH SUCCESS");
             last_activity = esp_timer_get_time();
 
@@ -607,10 +615,15 @@ static void notify_payload(void)
         return;
     }
 
-    ble_gatts_notify_custom(
+    int rc = ble_gatts_notify_custom(
         s_conn_handle,
         s_data_handle,
         om);
+
+    if (rc == 0)
+    {
+        last_activity = esp_timer_get_time();
+    }
 }
 
 static int send_text_common(
@@ -631,7 +644,7 @@ static int send_text_common(
 
     if (!bypass_auth)
     {
-        if (!s_connected || !s_text_notify_enabled || !s_authorized)
+        if (!s_connected || !s_authorized)
         {
             ESP_LOGW(TAG,
                      "TEXT send blocked: conn=%d text_notify=%d auth=%d bypass=%d",
@@ -640,6 +653,12 @@ static int send_text_common(
                      s_authorized ? 1 : 0,
                      bypass_auth ? 1 : 0);
             return BLE_ATT_ERR_UNLIKELY;
+        }
+
+        if (!s_text_notify_enabled)
+        {
+            ESP_LOGW(TAG,
+                     "TEXT notify flag is off, but auth is active; attempting send anyway");
         }
     }
 
@@ -656,6 +675,18 @@ static int send_text_common(
         conn_handle,
         s_text_handle,
         om);
+
+    if (rc == 0)
+    {
+        int64_t now_us = esp_timer_get_time();
+        last_activity = now_us;
+        last_ble_activity = now_us;
+        if (!s_text_notify_enabled)
+        {
+            s_text_notify_enabled = true;
+            ESP_LOGI(TAG, "TEXT notify auto-enabled after successful TX");
+        }
+    }
 
     ESP_LOGI(TAG, "notify rc=%d msg=%s", rc, msg);
     return rc;
@@ -793,6 +824,8 @@ static int gap_event(
 
         case BLE_GAP_EVENT_DISCONNECT:
             ESP_LOGI(TAG, "Disconnected reason=%d", event->disconnect.reason);
+			nimble_adv_deinit();
+			g_force_run_state = true;
 			s_authorized = false;
             reset_connection_state();
             generate_new_challenge();
@@ -802,14 +835,17 @@ static int gap_event(
         {
             ESP_LOGI(
                 TAG,
-                "SUBSCRIBE attr=%u cur_notify=%d prev_notify=%d",
+                "SUBSCRIBE attr=%u cur_notify=%d prev_notify=%d text_handle=%u data_handle=%u",
                 event->subscribe.attr_handle,
                 event->subscribe.cur_notify,
-                event->subscribe.prev_notify);
+                event->subscribe.prev_notify,
+                s_text_handle,
+                s_data_handle);
 
-            if (event->subscribe.attr_handle == s_text_handle)
+            if (is_text_notify_handle(event->subscribe.attr_handle))
             {
                 s_text_notify_enabled = event->subscribe.cur_notify;
+                last_ble_activity = esp_timer_get_time();
 
                 ESP_LOGI(
                     TAG,
@@ -817,7 +853,8 @@ static int gap_event(
                     s_text_notify_enabled ? "ENABLED" : "DISABLED");
             }
 
-            if (event->subscribe.attr_handle == s_data_handle)
+            if (event->subscribe.attr_handle == s_data_handle ||
+                event->subscribe.attr_handle == (uint16_t)(s_data_handle + 1))
             {
                 s_data_notify_enabled = event->subscribe.cur_notify;
 
@@ -877,6 +914,8 @@ esp_err_t nimble_adv_init(
     }
 
     nimble_port_init();
+	esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ESP_PWR_LVL_P9);
+	esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL_P9);
 
     ble_svc_gap_init();
     ble_svc_gatt_init();
@@ -917,9 +956,6 @@ void nimble_adv_deinit(void)
 
 void nimble_adv_disconnect(void)
 {
-    if (!s_connected) {
-        return;
-    }
 
     ble_gap_terminate(
         s_conn_handle,

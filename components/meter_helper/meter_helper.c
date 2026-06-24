@@ -12,6 +12,7 @@
 #include "deep_sleep_manager.h"
 #include "../meter_storage/include/meter_storage.h"
 
+#include "../nimble_adv/include/nimble_adv.h"
 #include "time.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -47,7 +48,6 @@
 
 extern uint32_t rtc_blocks;
 extern uint32_t pulse_bucket;
-
 extern bool ble_started;
 extern bool last_tamper_state;
 extern int64_t last_activity;
@@ -60,6 +60,8 @@ extern uint32_t rtc_blocks;
 extern uint32_t pulse_bucket;
 RTC_DATA_ATTR uint8_t first_mag_tamper = 0;
 int64_t auth_start_us = 0;
+extern bool g_force_run_state;
+extern int64_t last_ble_activity;
 /* =========================================================
  * INTERNAL RTC-PERSISTENT TAMPER STATE
  * ========================================================= */
@@ -331,6 +333,32 @@ void meter_helper_clear_all_tampers(void)
  * lora_emit — LoRa only, hard-capped at 50 bytes, compact format
  * ========================================================= */
 
+/* Add near the top of meter_helper.c */
+static char s_last_ble_msg[128];
+static int64_t s_last_ble_msg_us = 0;
+#define BLE_DUP_SUPPRESS_US 1000000LL   /* 1 second */
+
+/* Helper: true if this BLE message should be sent */
+static bool ble_should_send_msg(const char *msg)
+{
+    if (!msg || msg[0] == '\0') {
+        return false;
+    }
+
+    int64_t now_us = esp_timer_get_time();
+
+    if (strcmp(msg, s_last_ble_msg) == 0 &&
+        (now_us - s_last_ble_msg_us) < BLE_DUP_SUPPRESS_US)
+    {
+        return false;
+    }
+
+    strlcpy(s_last_ble_msg, msg, sizeof(s_last_ble_msg));
+    s_last_ble_msg_us = now_us;
+    return true;
+}
+
+/* Replace ble_emit_line() with this */
 static void ble_emit_line(const char *msg)
 {
     if (!msg) return;
@@ -339,14 +367,17 @@ static void ble_emit_line(const char *msg)
     if (ble_command_handler_get_source() == WM_CMD_SRC_LORA)
     {
         lora_manager_send_text(msg);
+        return;
     }
-    else
-    {
-        ble_buffer_push(msg);
-        nimble_adv_send_control_text(msg);
+
+    if (!ble_should_send_msg(msg)) {
+        return;
     }
+
+    nimble_adv_send_control_text(msg);
 }
 
+/* Replace ble_emit_control_line() with this */
 static void ble_emit_control_line(const char *fmt, ...)
 {
     char buffer[128];
@@ -360,12 +391,14 @@ static void ble_emit_control_line(const char *fmt, ...)
     if (ble_command_handler_get_source() == WM_CMD_SRC_LORA)
     {
         lora_manager_send_text(buffer);
+        return;
     }
-    else
-    {
-        ble_buffer_push(buffer);
-        nimble_adv_send_control_text(buffer);
+
+    if (!ble_should_send_msg(buffer)) {
+        return;
     }
+
+    nimble_adv_send_control_text(buffer);
 }
 
 /*
@@ -543,6 +576,7 @@ void publish_current_state(void)
 
 void ble_command_handler(const char *cmd)
 {
+	last_ble_activity = esp_timer_get_time();
     if (!cmd) return;
 
     char local[96];
@@ -612,8 +646,10 @@ void ble_command_handler(const char *cmd)
      * ----------------------------------------------------- */
     if (strcmp(cmd, "DISC") == 0)
     {
+		
         nimble_adv_authorize(false);
         nimble_adv_disconnect();
+		g_force_run_state = false;
         return;
     }
 
@@ -631,7 +667,7 @@ void ble_command_handler(const char *cmd)
             meter_storage_set_location_coords(lat, lon) == ESP_OK)
         {
             if (!from_lora) ble_emit_control_line("[EEPROM] LOCATION UPDATED : %.6f, %.6f", lat, lon);
-            publish_current_state();
+            
 			if(cfg_command){
 						return;
 					}
@@ -695,7 +731,7 @@ void ble_command_handler(const char *cmd)
                 s_features.ble_enabled  ? 1 : 0, s_features.lora_enabled ? 1 : 0,
                 s_ble_month_locked ? 1 : 0,       s_lora_month_locked ? 1 : 0);
         else
-            lora_emit("BLE=%d,LOR=%d,BL=%d,LL=%d",
+            lora_emit("OK BLE=%d,LOR=%d,BL=%d,LL=%d",
                 s_features.ble_enabled  ? 1 : 0, s_features.lora_enabled ? 1 : 0,
                 s_ble_month_locked ? 1 : 0,       s_lora_month_locked ? 1 : 0);
         return;
@@ -732,11 +768,11 @@ void ble_command_handler(const char *cmd)
     {
         if (!from_lora)
         {
-            if      (first_mag_tamper == 0) ble_emit_control_line("NO MAG TAMPER");
-            else if (first_mag_tamper == 1) ble_emit_control_line("YES");
-            else                            ble_emit_control_line("NO");
+            if      (first_mag_tamper == 0) ble_emit_control_line("OK NO MAG TAMPER");
+            else if (first_mag_tamper == 1) ble_emit_control_line("OK YES");
+            else                            ble_emit_control_line("OK NO");
         }
-        else { lora_emit("MAG=%d", first_mag_tamper ? 1 : 0); }
+        else { lora_emit("OK MAG=%d", first_mag_tamper ? 1 : 0); }
         return;
     }
 
@@ -748,7 +784,7 @@ void ble_command_handler(const char *cmd)
      * ----------------------------------------------------- */
     if (strcmp(local, "GET") == 0)
     {
-        publish_current_state();
+        
         if (!from_lora) ble_emit_control_line("[BLE] GET OK");
         else
         {
@@ -883,9 +919,9 @@ void ble_command_handler(const char *cmd)
         meter_helper_clear_all_tampers();
         tamper_reset();
         (void)meter_helper_flush_runtime_save(true);
-        publish_current_state();
+
         if (!from_lora) ble_emit_line("[TAMPER] CLEARED");
-        lora_emit("OK");
+        lora_emit("OK TAMPER");
         return;
     }
 
@@ -922,7 +958,7 @@ void ble_command_handler(const char *cmd)
         const char *id = local + 13;
         if (meter_storage_set_meter_id(id) != ESP_OK) { lora_emit("ERR"); if (!from_lora) ble_emit_line("[EEPROM] SET_METER_ID FAILED"); return; }
         if (!from_lora) ble_emit_control_line("[EEPROM] METER ID UPDATED : %s", id);
-        publish_current_state();
+        
 		if(cfg_command){
 					return;
 				}
@@ -934,7 +970,7 @@ void ble_command_handler(const char *cmd)
         uint32_t v = strtoul(local + 15, NULL, 10);
         if (meter_storage_set_meter_type((uint8_t)v) != ESP_OK) { lora_emit("ERR"); if (!from_lora) ble_emit_line("[EEPROM] SET_METER_TYPE FAILED"); return; }
         if (!from_lora) ble_emit_control_line("[EEPROM] METER TYPE UPDATED : %u", (unsigned)v);
-        publish_current_state();
+        
 		if(cfg_command){
 			return;
 		}
@@ -946,7 +982,7 @@ void ble_command_handler(const char *cmd)
         uint32_t v = strtoul(local + 15, NULL, 10);
         if (meter_storage_set_volume_multiplier((uint8_t)v) != ESP_OK) { lora_emit("ERR"); if (!from_lora) ble_emit_line("[EEPROM] SET_MULTIPLIER FAILED"); return; }
         if (!from_lora) ble_emit_control_line("[EEPROM] MULTIPLIER UPDATED : %u", (unsigned)v);
-        publish_current_state();
+        
 		if(cfg_command){
 					return;
 				}
@@ -958,7 +994,7 @@ void ble_command_handler(const char *cmd)
         uint32_t v = strtoul(local + 12, NULL, 10);
         if (meter_storage_set_battery_level((uint8_t)v) != ESP_OK) { lora_emit("ERR"); if (!from_lora) ble_emit_line("[EEPROM] SET_BATTERY FAILED"); return; }
         if (!from_lora) ble_emit_control_line("[EEPROM] BATTERY UPDATED : %u", (unsigned)v);
-        publish_current_state(); lora_emit("OK"); return;
+         lora_emit("OK"); return;
     }
 
     if (strncmp(local, "SET_TZ ", 7) == 0)
@@ -966,7 +1002,7 @@ void ble_command_handler(const char *cmd)
         int32_t v = (int32_t)strtol(local + 7, NULL, 10);
         if (meter_storage_set_timezone_min(v) != ESP_OK) { lora_emit("ERR"); if (!from_lora) ble_emit_line("[EEPROM] SET_TZ FAILED"); return; }
         if (!from_lora) ble_emit_control_line("[EEPROM] TIMEZONE UPDATED : %" PRId32, v);
-        publish_current_state(); lora_emit("OK"); return;
+         lora_emit("OK"); return;
     }
 
     if (strncmp(local, "SET_INSTALL_DATE ", 17) == 0)
@@ -975,7 +1011,7 @@ void ble_command_handler(const char *cmd)
         if (sscanf(local + 17, "%u %u %u", &d, &m, &y) != 3) { lora_emit("ERR"); if (!from_lora) ble_emit_line("[EEPROM] SET_INSTALL_DATE FORMAT: DD MM YYYY"); return; }
         if (meter_storage_set_install_date((uint8_t)d, (uint8_t)m, (uint16_t)y) != ESP_OK) { lora_emit("ERR"); if (!from_lora) ble_emit_line("[EEPROM] SET_INSTALL_DATE FAILED"); return; }
         if (!from_lora) ble_emit_control_line("[EEPROM] INSTALL DATE UPDATED : %02u-%02u-%04u", d, m, y);
-        publish_current_state();
+        
 		if(cfg_command){
 			return;
 		}
@@ -989,7 +1025,7 @@ void ble_command_handler(const char *cmd)
         rtc_blocks = v / BLOCK_SIZE; pulse_bucket = v % BLOCK_SIZE;
         if (meter_storage_set_install_counter((uint16_t)v) != ESP_OK) { lora_emit("ERR"); if (!from_lora) ble_emit_line("[EEPROM] SET_INSTALL_COUNTER FAILED"); return; }
         if (!from_lora) ble_emit_control_line("[EEPROM] INSTALL COUNTER UPDATED : %u", (unsigned)v);
-        publish_current_state();
+        
 		if(cfg_command){
 					return;
 				}
@@ -1013,7 +1049,7 @@ void ble_command_handler(const char *cmd)
             if (!from_lora) ble_emit_line("[EEPROM] TIME SAVE FAILED");
 
         if (!from_lora) ble_emit_control_line("[TIME] UPDATED EPOCH=%" PRIi64, epoch);
-        publish_current_state(); lora_emit("OK"); return;
+         lora_emit("OK"); return;
     }
 
     /* -------------------------------------------------------
@@ -1024,8 +1060,8 @@ void ble_command_handler(const char *cmd)
     {
         uint32_t total = meter_total(rtc_blocks, pulse_bucket, BLOCK_SIZE);
         if (!from_lora) ble_emit_control_line("[BLE] TOTAL : %" PRIu32, total);
-        publish_current_state();
-        lora_emit("TOT=%lu", (unsigned long)total);
+        
+        lora_emit("OK TOT=%lu", (unsigned long)total);
         return;
     }
 

@@ -16,6 +16,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
 #include "hal/gpio_types.h"
+#include "soc/gpio_num.h"
 
 static const char *TAG = "cyclic_counter";
 
@@ -68,13 +69,6 @@ static void IRAM_ATTR process_edge_locked(cyclic_state_t current)
 
     s_last_state = current;
 }
-/* =========================================================
- * DEBOUNCE CHECK
- * ========================================================= */
-
- /* =========================================================
-  * DEBOUNCE CHECK
-  * ========================================================= */
 
  static bool IRAM_ATTR debounce_ok(gpio_num_t gpio, int64_t now_us)
  {
@@ -154,13 +148,8 @@ void cyclic_counter_process_wakeup(int gpio1, int gpio2)
     bool g1_fired = (wake_mask & (1ULL << gpio1)) != 0;
     bool g2_fired = (wake_mask & (1ULL << gpio2)) != 0;
 
-    ESP_LOGI(TAG,
-             "EXT1 wakeup: G1=%d G2=%d | last_state=%d count=%" PRIu32,
-             g1_fired, g2_fired,
-             (int)s_last_state,
-             (uint32_t)s_count);
 
-    if (g1_fired && g2_fired) {
+    if (g1_fired && g2_fired && !gpio_get_level(GPIO_NUM_12)) {
         /* Both low simultaneously — ambiguous, keep existing state */
         ESP_LOGW(TAG, "both GPIOs low — ambiguous, state kept");
         return;
@@ -173,7 +162,7 @@ void cyclic_counter_process_wakeup(int gpio1, int gpio2)
     } else if (g2_fired) {
         current = CYCLE_G2;
     } else {
-        ESP_LOGW(TAG, "EXT1 wakeup but wake_mask empty — spurious");
+        ESP_LOGI(TAG, "EXT1 wakeup but wake_up with tamper key");
         return;
     }
 

@@ -16,6 +16,7 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_sleep.h"
+#include "soc/gpio_num.h"
 
 static const char *TAG = "deep_sleep_manager";
 
@@ -56,30 +57,33 @@ static void clear_ext1_wakeup(void)
 
 static void ensure_gpio_inputs(void)
 {
-    gpio_config_t io = {
-        .pin_bit_mask =
-            (1ULL << WAKE_GPIO_A) |
-            (1ULL << WAKE_GPIO_B) |
-             (1ULL << WAKE_GPIO_C), //|
-//            (1ULL << WAKE_GPIO_D) |
-//            (1ULL << WAKE_GPIO_E),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE, //IT WAS ENABLE EARLIER, MADE CHANGES TO DEAL WITH GPIO12 WAKEUP ISSUE
-        .pull_down_en = GPIO_PULLDOWN_ENABLE,
-        .intr_type = GPIO_INTR_DISABLE
-    };
-
-    esp_err_t ret = gpio_config(&io);
-    if (ret != ESP_OK)
+    for (size_t i = 0; i < sizeof(s_wake_gpios) / sizeof(s_wake_gpios[0]); i++)
     {
-        ESP_LOGW(TAG, "gpio_config failed: %s", esp_err_to_name(ret));
+        gpio_num_t pin = s_wake_gpios[i];
+
+        gpio_config_t io = {
+            .pin_bit_mask = (1ULL << pin),
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE
+        };
+        if (pin == WAKE_GPIO_C) {
+            io.pull_down_en = GPIO_PULLDOWN_ENABLE;
+        }
+
+        esp_err_t ret = gpio_config(&io);
+        if (ret != ESP_OK)
+        {
+            ESP_LOGW(TAG, "gpio_config failed: %s", esp_err_to_name(ret));
+        }
     }
 }
-
 static bool pins_stable(void)
 {
     int prev[sizeof(s_wake_gpios) / sizeof(s_wake_gpios[0])];
     memset(prev, -1, sizeof(prev));
+	
 
     int stable_count = 0;
     int waited_ms = 0;
@@ -120,12 +124,6 @@ static bool pins_stable(void)
 
 static void configure_ext1_for_next_transition(void)
 {
-    /*
-     * EXT1 is level-based.
-     * We arm the opposite level of the current level so the next change
-     * can wake the chip without using any timer wakeup.
-     */
-
     uint64_t high_mask = 0;
     uint64_t low_mask = 0;
 
@@ -135,37 +133,30 @@ static void configure_ext1_for_next_transition(void)
     {
         levels[i] = gpio_get_level(s_wake_gpios[i]);
 
-        if (levels[i])
-        {
+        if (levels[i]) {
             low_mask |= (1ULL << s_wake_gpios[i]);
-        }
-        else
-        {
+        } else {
             high_mask |= (1ULL << s_wake_gpios[i]);
         }
     }
 
     clear_ext1_wakeup();
 
-	if (high_mask) {
-	        ESP_ERROR_CHECK(esp_sleep_enable_ext1_wakeup_io(high_mask, ESP_EXT1_WAKEUP_ANY_HIGH));
-	    }
-	if (low_mask) {
-	        ESP_ERROR_CHECK(esp_sleep_enable_ext1_wakeup_io(low_mask, ESP_EXT1_WAKEUP_ANY_LOW));
-	    }
+    if (high_mask) {
+        ESP_ERROR_CHECK(esp_sleep_enable_ext1_wakeup_io(high_mask, ESP_EXT1_WAKEUP_ANY_HIGH));
+    }
+    if (low_mask) {
+        ESP_ERROR_CHECK(esp_sleep_enable_ext1_wakeup_io(low_mask, ESP_EXT1_WAKEUP_ANY_LOW));
+    }
 
     printf(
         "\n[WAKE CONFIG]\n"
-        "[WAKE CONFIG] GPIO1=%d GPIO2=%d CASE=%d"
+        "[WAKE CONFIG] GPIO1=%d GPIO2=%d CASE=%d\n"
         "[WAKE CONFIG] HIGH MASK : 0x%llX\n"
         "[WAKE CONFIG] LOW  MASK : 0x%llX\n\n",
-        levels[0],
-        levels[1],
-        levels[2],
-        (unsigned long long)high_mask,
-        (unsigned long long)low_mask);
+        levels[0], levels[1], levels[2],
+        (unsigned long long)high_mask, (unsigned long long)low_mask);
 }
-
 static void enter_gpio_only_deep_sleep(void)
 {
     ensure_gpio_inputs();

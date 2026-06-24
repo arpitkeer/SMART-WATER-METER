@@ -32,7 +32,7 @@ esp_err_t lora_manager_send_text(const char *text);
 
 /* Last complete ASCII line received from LoRa */
 bool lora_manager_get_last_rx(char *out, size_t out_len);
-
+esp_err_t lora_sleep_sequence(void);
 typedef struct
 {
     bool board_has_lora;
